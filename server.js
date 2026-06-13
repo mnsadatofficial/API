@@ -70,6 +70,7 @@ const htmlHeaderBlock = `
     <script>
         function applySmartGrouping() {
             document.querySelectorAll('h1, h2, h3, h4, h5, h6').forEach(heading => {
+                if (heading.parentElement.classList.contains('heading-group')) return;
                 let next = heading.nextElementSibling;
                 if (next && (next.tagName === 'P' || next.tagName === 'IMG' || next.tagName === 'FIGURE' || next.classList.contains('block-math') || next.tagName === 'PRE')) {
                     let wrapper = document.createElement('div');
@@ -81,18 +82,28 @@ const htmlHeaderBlock = `
             });
         }
         
-        document.addEventListener("DOMContentLoaded", function() {
+        function initPdfAssets() {
             applySmartGrouping();
-            renderMathInElement(document.body, {
-                delimiters: [
-                    {left: "$$", right: "$$", display: true},
-                    {left: "$", right: "$", display: false},
-                    {left: "\\\\(", right: "\\\\)", display: false},
-                    {left: "\\\\[", right: "\\\\]", display: true}
-                ],
-                throwOnError: false
-            });
-        });
+            if (typeof renderMathInElement === "function") {
+                renderMathInElement(document.body, {
+                    delimiters: [
+                        {left: "$$", right: "$$", display: true},
+                        {left: "$", right: "$", display: false},
+                        {left: "\\\\(", right: "\\\\)", display: false},
+                        {left: "\\\\[", right: "\\\\]", display: true}
+                    ],
+                    throwOnError: false
+                });
+            }
+        }
+
+        window.initPdfAssets = initPdfAssets;
+
+        if (document.readyState === 'loading') {
+            document.addEventListener("DOMContentLoaded", initPdfAssets);
+        } else {
+            initPdfAssets();
+        }
     </script>
 </head>
 `;
@@ -106,24 +117,43 @@ function launchBrowser() {
             '--disable-setuid-sandbox',
             '--disable-dev-shm-usage',
             '--disable-gpu',
-            '--disable-accelerated-2d-canvas',
-            '--disable-features=IsolateOrigins,site-per-process' // Helps with memory issues on some servers
+            '--no-zygote',
+            '--disable-extensions'
         ]
     });
 }
 
-async function calculateContentPages(browser, content) {
-    const page = await browser.newPage();
-    const html = `<!DOCTYPE html><html>${htmlHeaderBlock}<body><div class="article-content">${content}</div></body></html>`;
-    // networkidle2 is safer for external scripts/fonts, added timeout to prevent hanging
-    await page.setContent(html, { waitUntil: 'networkidle2', timeout: 60000 });
-    const tempBuffer = await page.pdf({ format: 'A4', printBackground: true, margin: pdfMargin });
-    await page.close();
-    const count = tempBuffer.toString().split('/Type /Page').length - 1;
-    return count || 1;
+// সুপার ফাস্ট পেজ কাউন্টিং লজিক (রিয়েলটাইম ইন-মেমোরি ইনজেকশন)
+async function calculateContentPages(page, content) {
+    try {
+        await page.evaluate((htmlContent) => {
+            const div = document.getElementById('content');
+            div.innerHTML = htmlContent;
+            if (typeof window.initPdfAssets === 'function') {
+                window.initPdfAssets();
+            }
+        }, content);
+
+        const tempBuffer = await page.pdf({ format: 'A4', printBackground: true, margin: pdfMargin });
+        const pdfBinary = tempBuffer.toString('binary');
+        
+        let count = 0;
+        const matches = pdfBinary.match(/\/Type\s*\/Page\b/g);
+        count = matches ? matches.length : 0;
+        
+        if (count === 0) {
+            const countMatch = pdfBinary.match(/\/Count\s+(\d+)/);
+            if (countMatch) count = parseInt(countMatch[1], 10);
+        }
+        
+        return count || 1;
+    } catch (err) {
+        console.error("Error calculating pages:", err);
+        return 1;
+    }
 }
 
-// এন্ডপয়েন্ট ১: সিঙ্গেল আর্টিকেল পিডিএফ
+// এন্ডপয়েন্ট ১: একক আর্টিকেল পিডিএফ জেনারেশন
 app.post('/api/v1/pdf/generate-article', async (req, res) => {
     let browser = null;
     try {
@@ -136,7 +166,7 @@ app.post('/api/v1/pdf/generate-article', async (req, res) => {
         const finalHtml = `
         <!DOCTYPE html>
         <html lang="bn">
-        ${htmlHeaderBlock}
+        ${htmlHeaderBlock.replace('<head>', `<head>\n    <title>${title}</title>`)}
         <body>
             <div class="cover-page">
                 <div class="cover-main">
@@ -151,7 +181,9 @@ app.post('/api/v1/pdf/generate-article', async (req, res) => {
         </body>
         </html>`;
 
-        await page.setContent(finalHtml, { waitUntil: 'networkidle2', timeout: 60000 });
+        await page.setContent(finalHtml, { waitUntil: 'load', timeout: 30000 });
+        await page.evaluate(async () => { await document.fonts.ready; });
+
         const pdfBuffer = await page.pdf({
             format: 'A4',
             printBackground: true,
@@ -159,21 +191,21 @@ app.post('/api/v1/pdf/generate-article', async (req, res) => {
             headerTemplate: '<div></div>',
             footerTemplate: '<div style="width: 100%; text-align: center; font-size: 10px; font-family: sans-serif; color: #777;"><span class="pageNumber"></span></div>',
             margin: pdfMargin,
-            timeout: 60000 // PDF জেনারেট হওয়ার জন্য পর্যাপ্ত সময়
+            timeout: 30000
         });
 
-        res.set({ 'Content-Type': 'application/pdf', 'Content-Length': pdfBuffer.length, 'Content-Disposition': `inline; filename="${encodeURIComponent(title)}.pdf"` });
-        res.send(pdfBuffer);
+        const base64Pdf = Buffer.from(pdfBuffer).toString('base64');
+        res.status(200).json({ pdf: base64Pdf });
+
     } catch (error) {
-        console.error("Error generating single article PDF:", error);
-        // ফ্রন্টএন্ডে আসল এরর মেসেজটি পাঠানো হচ্ছে
-        res.status(500).json({ error: error.message || 'Internal Server Error while generating PDF' });
+        console.error("Single PDF Error:", error);
+        res.status(500).json({ error: error.message || 'Internal Server Error' });
     } finally {
         if (browser) await browser.close();
     }
 });
 
-// এন্ডপয়েন্ট ২: সম্পূর্ণ সিরিজ বুক পিডিএফ
+// এন্ডপয়েন্ট ২: সম্পূর্ণ সিরিজ বুক পিডিএফ জেনারেশন (অপ্টিমাইজড)
 app.post('/api/v1/pdf/generate-series', async (req, res) => {
     let browser = null;
     try {
@@ -183,22 +215,33 @@ app.post('/api/v1/pdf/generate-series', async (req, res) => {
         }
 
         browser = await launchBrowser();
+        
+        // ১. পেজ কাউন্টের জন্য মাত্র একটি একক ব্ল্যাঙ্ক পেজ তৈরি করা হলো এবং এসেট ১ বার লোড হলো
+        const counterPage = await browser.newPage();
+        const counterHtml = `<!DOCTYPE html><html>${htmlHeaderBlock.replace('<head>', `<head>\n    <title>${seriesName} - Counter</title>`)}<body><div id="content" class="article-content"></div></body></html>`;
+        await counterPage.setContent(counterHtml, { waitUntil: 'load', timeout: 30000 });
+        await counterPage.evaluate(async () => { await document.fonts.ready; });
+
         let currentPagePointer = 2;
         const computedArticles = [];
 
+        // ২. একই পেজে দ্রুত ইনার-এইচটিএমএল পুশ করে পেজ নম্বর ক্যালকুলেট করা (No Re-loads)
         for (const art of articles) {
             const chapterCoverPage = currentPagePointer + 1;
-            currentPagePointer += 1;
+            currentPagePointer += 1; 
             
-            const contentPages = await calculateContentPages(browser, art.content);
+            const contentPages = await calculateContentPages(counterPage, art.content);
             computedArticles.push({ ...art, pageNum: chapterCoverPage });
             currentPagePointer += contentPages;
         }
+        
+        await counterPage.close(); // কাউন্টিং শেষ, মেমোরি ক্লিয়ার
 
+        // ৩. ইনডেক্স ও মূল কনটেন্ট সহ ফাইনাল HTML তৈরি
         let htmlStr = `
         <!DOCTYPE html>
         <html lang="bn">
-        ${htmlHeaderBlock}
+        ${htmlHeaderBlock.replace('<head>', `<head>\n    <title>${seriesName}</title>`)}
         <body>
             <div class="cover-page">
                 <div class="cover-main">
@@ -247,23 +290,27 @@ app.post('/api/v1/pdf/generate-series', async (req, res) => {
 
         htmlStr += `</body></html>`;
 
-        const page = await browser.newPage();
-        await page.setContent(htmlStr, { waitUntil: 'networkidle2', timeout: 90000 }); // সিরিজের জন্য সময় একটু বাড়িয়ে দেওয়া হলো
-        const pdfBuffer = await page.pdf({
+        // ৪. ফাইনাল কম্পাইল্ড বুক পিডিএফ জেনারেট করা
+        const finalPage = await browser.newPage();
+        await finalPage.setContent(htmlStr, { waitUntil: 'load', timeout: 30000 });
+        await finalPage.evaluate(async () => { await document.fonts.ready; });
+        
+        const pdfBuffer = await finalPage.pdf({
             format: 'A4',
             printBackground: true,
             displayHeaderFooter: true,
             headerTemplate: '<div></div>',
             footerTemplate: '<div style="width: 100%; text-align: center; font-size: 10px; font-family: sans-serif; color: #777;"><span class="pageNumber"></span></div>',
             margin: pdfMargin,
-            timeout: 90000
+            timeout: 30000
         });
 
-        res.set({ 'Content-Type': 'application/pdf', 'Content-Length': pdfBuffer.length, 'Content-Disposition': `inline; filename="${encodeURIComponent(seriesName)}_Series.pdf"` });
-        res.send(pdfBuffer);
+        const base64Pdf = Buffer.from(pdfBuffer).toString('base64');
+        res.status(200).json({ pdf: base64Pdf });
+
     } catch (error) {
-        console.error("Error generating series PDF:", error);
-        res.status(500).json({ error: error.message || 'Internal Server Error while generating Series PDF' });
+        console.error("Series PDF Error:", error);
+        res.status(500).json({ error: error.message || 'Internal Server Error' });
     } finally {
         if (browser) await browser.close();
     }
