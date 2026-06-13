@@ -105,11 +105,14 @@ function launchBrowser() {
             '--no-sandbox',
             '--disable-setuid-sandbox',
             '--disable-dev-shm-usage',
-            '--disable-gpu'
+            '--disable-accelerated-2d-canvas',
+            '--disable-gpu',
+            '--no-first-run',
+            '--no-zygote',
+            '--single-process' // এটি রেন্ডারের লিমিটেড র‍্যামে ক্র্যাশ হওয়া আটকাবে
         ]
     });
 }
-
 async function calculateContentPages(browser, content) {
     const page = await browser.newPage();
     const html = `<!DOCTYPE html><html>${htmlHeaderBlock}<body><div class="article-content">${content}</div></body></html>`;
