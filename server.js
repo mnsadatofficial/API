@@ -105,18 +105,18 @@ function launchBrowser() {
             '--no-sandbox',
             '--disable-setuid-sandbox',
             '--disable-dev-shm-usage',
-            '--disable-accelerated-2d-canvas',
             '--disable-gpu',
-            '--no-first-run',
-            '--no-zygote',
-            '--single-process' // এটি রেন্ডারের লিমিটেড র‍্যামে ক্র্যাশ হওয়া আটকাবে
+            '--disable-accelerated-2d-canvas',
+            '--disable-features=IsolateOrigins,site-per-process' // Helps with memory issues on some servers
         ]
     });
 }
+
 async function calculateContentPages(browser, content) {
     const page = await browser.newPage();
     const html = `<!DOCTYPE html><html>${htmlHeaderBlock}<body><div class="article-content">${content}</div></body></html>`;
-    await page.setContent(html, { waitUntil: 'networkidle0' });
+    // networkidle2 is safer for external scripts/fonts, added timeout to prevent hanging
+    await page.setContent(html, { waitUntil: 'networkidle2', timeout: 60000 });
     const tempBuffer = await page.pdf({ format: 'A4', printBackground: true, margin: pdfMargin });
     await page.close();
     const count = tempBuffer.toString().split('/Type /Page').length - 1;
@@ -151,21 +151,23 @@ app.post('/api/v1/pdf/generate-article', async (req, res) => {
         </body>
         </html>`;
 
-        await page.setContent(finalHtml, { waitUntil: 'networkidle0' });
+        await page.setContent(finalHtml, { waitUntil: 'networkidle2', timeout: 60000 });
         const pdfBuffer = await page.pdf({
             format: 'A4',
             printBackground: true,
             displayHeaderFooter: true,
             headerTemplate: '<div></div>',
             footerTemplate: '<div style="width: 100%; text-align: center; font-size: 10px; font-family: sans-serif; color: #777;"><span class="pageNumber"></span></div>',
-            margin: pdfMargin
+            margin: pdfMargin,
+            timeout: 60000 // PDF জেনারেট হওয়ার জন্য পর্যাপ্ত সময়
         });
 
         res.set({ 'Content-Type': 'application/pdf', 'Content-Length': pdfBuffer.length, 'Content-Disposition': `inline; filename="${encodeURIComponent(title)}.pdf"` });
         res.send(pdfBuffer);
     } catch (error) {
-        console.error(error);
-        res.status(500).json({ error: 'Internal Server Error' });
+        console.error("Error generating single article PDF:", error);
+        // ফ্রন্টএন্ডে আসল এরর মেসেজটি পাঠানো হচ্ছে
+        res.status(500).json({ error: error.message || 'Internal Server Error while generating PDF' });
     } finally {
         if (browser) await browser.close();
     }
@@ -246,21 +248,22 @@ app.post('/api/v1/pdf/generate-series', async (req, res) => {
         htmlStr += `</body></html>`;
 
         const page = await browser.newPage();
-        await page.setContent(htmlStr, { waitUntil: 'networkidle0' });
+        await page.setContent(htmlStr, { waitUntil: 'networkidle2', timeout: 90000 }); // সিরিজের জন্য সময় একটু বাড়িয়ে দেওয়া হলো
         const pdfBuffer = await page.pdf({
             format: 'A4',
             printBackground: true,
             displayHeaderFooter: true,
             headerTemplate: '<div></div>',
             footerTemplate: '<div style="width: 100%; text-align: center; font-size: 10px; font-family: sans-serif; color: #777;"><span class="pageNumber"></span></div>',
-            margin: pdfMargin
+            margin: pdfMargin,
+            timeout: 90000
         });
 
         res.set({ 'Content-Type': 'application/pdf', 'Content-Length': pdfBuffer.length, 'Content-Disposition': `inline; filename="${encodeURIComponent(seriesName)}_Series.pdf"` });
         res.send(pdfBuffer);
     } catch (error) {
-        console.error(error);
-        res.status(500).json({ error: 'Internal Server Error' });
+        console.error("Error generating series PDF:", error);
+        res.status(500).json({ error: error.message || 'Internal Server Error while generating Series PDF' });
     } finally {
         if (browser) await browser.close();
     }
