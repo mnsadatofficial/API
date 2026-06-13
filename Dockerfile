@@ -1,17 +1,7 @@
-FROM node:18-slim
+FROM ghcr.io/puppeteer/puppeteer:23.0.0
 
-RUN apt-get update && apt-get install -y \
-    chromium \
-    fonts-ipafont-gothic \
-    fonts-wqy-zenhei \
-    fonts-thai-tlwg \
-    fonts-kacst \
-    fonts-freefont-ttf \
-    libxss1 \
-    --no-install-recommends && rm -rf /var/lib/apt/lists/*
-
-ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
-    PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
+# রুট ইউজার হিসেবে ডকার কনফিগার করা যাতে পারমিশন এরর না আসে
+USER root
 
 WORKDIR /app
 
@@ -22,4 +12,5 @@ COPY . .
 
 EXPOSE 3000
 
+# স্যান্ডবক্স ডিজেবল করে ক্রোমিয়াম রান করার কমান্ড
 CMD ["node", "server.js"]
