@@ -123,16 +123,33 @@ function launchBrowser() {
     });
 }
 
-// সুপার ফাস্ট পেজ কাউন্টিং লজিক (রিয়েলটাইম ইন-মেমোরি ইনজেকশন)
+// -------------------------------------------------------------
+// ফিক্স: ইমেজ লোড হওয়া পর্যন্ত ওয়েট করার লজিক যুক্ত করা হলো
+// -------------------------------------------------------------
 async function calculateContentPages(page, content) {
     try {
-        await page.evaluate((htmlContent) => {
+        await page.evaluate(async (htmlContent) => {
             const div = document.getElementById('content');
             div.innerHTML = htmlContent;
             if (typeof window.initPdfAssets === 'function') {
                 window.initPdfAssets();
             }
+            
+            // ইমেজের হাইট মিসম্যাচ এড়াতে ইমেজ লোড হওয়া পর্যন্ত অপেক্ষা
+            const images = Array.from(document.querySelectorAll('img'));
+            await Promise.all(images.map(img => {
+                if (img.complete) return Promise.resolve();
+                return new Promise(resolve => {
+                    img.onload = resolve;
+                    img.onerror = resolve; // এরর হলেও কাউন্টিং যেন না থামে
+                });
+            }));
+            
+            await document.fonts.ready;
         }, content);
+
+        // DOM আপডেটের জন্য ছোট্ট একটা বাফার
+        await new Promise(resolve => setTimeout(resolve, 150));
 
         const tempBuffer = await page.pdf({ format: 'A4', printBackground: true, margin: pdfMargin });
         const pdfBinary = tempBuffer.toString('binary');
@@ -216,16 +233,15 @@ app.post('/api/v1/pdf/generate-series', async (req, res) => {
 
         browser = await launchBrowser();
         
-        // ১. পেজ কাউন্টের জন্য মাত্র একটি একক ব্ল্যাঙ্ক পেজ তৈরি করা হলো এবং এসেট ১ বার লোড হলো
         const counterPage = await browser.newPage();
         const counterHtml = `<!DOCTYPE html><html>${htmlHeaderBlock.replace('<head>', `<head>\n    <title>${seriesName} - Counter</title>`)}<body><div id="content" class="article-content"></div></body></html>`;
         await counterPage.setContent(counterHtml, { waitUntil: 'load', timeout: 30000 });
         await counterPage.evaluate(async () => { await document.fonts.ready; });
 
-        let currentPagePointer = 2;
+        let currentPagePointer = 2; // কভার = ১, ইনডেক্স = ২
         const computedArticles = [];
 
-        // ২. একই পেজে দ্রুত ইনার-এইচটিএমএল পুশ করে পেজ নম্বর ক্যালকুলেট করা (No Re-loads)
+        // ২. রিয়েলটাইম ইমেজ-অ্যাওয়ার পেজ কাউন্টিং
         for (const art of articles) {
             const chapterCoverPage = currentPagePointer + 1;
             currentPagePointer += 1; 
@@ -235,7 +251,7 @@ app.post('/api/v1/pdf/generate-series', async (req, res) => {
             currentPagePointer += contentPages;
         }
         
-        await counterPage.close(); // কাউন্টিং শেষ, মেমোরি ক্লিয়ার
+        await counterPage.close(); 
 
         // ৩. ইনডেক্স ও মূল কনটেন্ট সহ ফাইনাল HTML তৈরি
         let htmlStr = `
@@ -292,7 +308,7 @@ app.post('/api/v1/pdf/generate-series', async (req, res) => {
 
         // ৪. ফাইনাল কম্পাইল্ড বুক পিডিএফ জেনারেট করা
         const finalPage = await browser.newPage();
-        await finalPage.setContent(htmlStr, { waitUntil: 'load', timeout: 30000 });
+        await finalPage.setContent(htmlStr, { waitUntil: 'networkidle0', timeout: 90000 });
         await finalPage.evaluate(async () => { await document.fonts.ready; });
         
         const pdfBuffer = await finalPage.pdf({
@@ -302,7 +318,7 @@ app.post('/api/v1/pdf/generate-series', async (req, res) => {
             headerTemplate: '<div></div>',
             footerTemplate: '<div style="width: 100%; text-align: center; font-size: 10px; font-family: sans-serif; color: #777;"><span class="pageNumber"></span></div>',
             margin: pdfMargin,
-            timeout: 30000
+            timeout: 90000
         });
 
         const base64Pdf = Buffer.from(pdfBuffer).toString('base64');
